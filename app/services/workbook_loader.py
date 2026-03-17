@@ -52,10 +52,21 @@ def _extract_table(df: pd.DataFrame, sheet_name: str) -> pd.DataFrame | None:
     threshold = max(1, non_null_counts.max() * 0.5)
     header_idx = non_null_counts[non_null_counts >= threshold].index[0]
 
-    df.columns = [
+    raw_cols = [
         str(df.loc[header_idx, c]).strip() if pd.notna(df.loc[header_idx, c]) else f"col_{i}"
         for i, c in enumerate(df.columns)
     ]
+    # Deduplicate column names to avoid ambiguous DataFrame[col] lookups
+    seen: dict[str, int] = {}
+    deduped = []
+    for name in raw_cols:
+        if name in seen:
+            seen[name] += 1
+            deduped.append(f"{name}_{seen[name]}")
+        else:
+            seen[name] = 0
+            deduped.append(name)
+    df.columns = deduped
     df = df.loc[header_idx + 1:].reset_index(drop=True)
 
     # Drop rows that are entirely empty after header extraction
@@ -64,9 +75,12 @@ def _extract_table(df: pd.DataFrame, sheet_name: str) -> pd.DataFrame | None:
     if df.empty:
         return None
 
-    # Coerce types: try numeric conversion on object columns
+    # Coerce types: try numeric conversion on object columns.
+    # Only apply if conversion introduces no new NaN values (mirrors old errors="ignore" behavior).
     for col in df.select_dtypes(include="object").columns:
-        df[col] = pd.to_numeric(df[col], errors="ignore")
+        converted = pd.to_numeric(df[col], errors="coerce")
+        if converted.isna().sum() == df[col].isna().sum():
+            df[col] = converted
 
     return df
 

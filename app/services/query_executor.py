@@ -83,4 +83,6 @@ def _safe_value(v):
         return None if math.isnan(f) else f
     if isinstance(v, (np.bool_,)):
         return bool(v)
+    if isinstance(v, float) and math.isnan(v):
+        return None
     return v

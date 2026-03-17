@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     secret_key: str = "change-me-in-production"
     upload_dir: str = "./uploads"
     max_upload_size_mb: int = 50
+    allowed_origins: list[str] = []
 
     class Config:
         env_file = ".env"

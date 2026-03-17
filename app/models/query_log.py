@@ -1,6 +1,6 @@
 from datetime import datetime
 from sqlalchemy import String, Integer, DateTime, Text, JSON, ForeignKey
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base
 
 
@@ -8,7 +8,7 @@ class QueryLog(Base):
     __tablename__ = "query_logs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    workbook_id: Mapped[int] = mapped_column(Integer, ForeignKey("workbooks.id"))
+    workbook_id: Mapped[int] = mapped_column(Integer, ForeignKey("workbooks.id", ondelete="CASCADE"))
     question: Mapped[str] = mapped_column(Text)
     generated_sql: Mapped[str] = mapped_column(Text, nullable=True)
     answer_raw: Mapped[str] = mapped_column(Text, nullable=True)
