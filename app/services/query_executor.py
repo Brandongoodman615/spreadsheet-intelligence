@@ -2,7 +2,7 @@ import duckdb
 from app.schemas.query import QueryPlan, QueryResult, Attribution
 
 
-def execute_plan(plan: QueryPlan, conn: duckdb.DuckDBPyConnection) -> QueryResult:
+def execute_plan(plan: QueryPlan, conn: duckdb.DuckDBPyConnection, question: str = "") -> QueryResult:
     """
     Execute the SQL from a QueryPlan against the DuckDB connection.
     Returns exact results — all arithmetic happens here, never in the LLM.
@@ -34,7 +34,7 @@ def execute_plan(plan: QueryPlan, conn: duckdb.DuckDBPyConnection) -> QueryResul
     )
 
     return QueryResult(
-        question="",  # filled in by caller
+        question=question,
         answer=answer,
         sql=plan.sql,
         explanation=plan.explanation,
@@ -46,12 +46,31 @@ def execute_plan(plan: QueryPlan, conn: duckdb.DuckDBPyConnection) -> QueryResul
 def _extract_columns(sql: str) -> list[str]:
     """
     Best-effort column extraction from SQL for attribution display.
+    Captures both quoted identifiers ("My Column") and unquoted column references.
     # Future: use a proper SQL parser (sqlglot) for accurate column lineage.
     """
     import re
-    # Pull out quoted identifiers and unquoted column-like tokens
-    quoted = re.findall(r'"([^"]+)"', sql)
-    return list(dict.fromkeys(quoted)) if quoted else []
+
+    columns = []
+
+    # Quoted identifiers: "Column Name"
+    columns += re.findall(r'"([^"]+)"', sql)
+
+    # Unquoted columns after SELECT, WHERE, GROUP BY, ORDER BY, ON
+    # Strip keywords, aliases, functions, table prefixes, and SQL keywords
+    keywords = {
+        "SELECT", "FROM", "WHERE", "AND", "OR", "NOT", "GROUP", "BY", "ORDER",
+        "HAVING", "JOIN", "LEFT", "RIGHT", "INNER", "OUTER", "ON", "AS",
+        "COUNT", "SUM", "AVG", "MIN", "MAX", "DISTINCT", "LIMIT", "OFFSET",
+        "ASC", "DESC", "NULL", "IS", "IN", "BETWEEN", "LIKE", "CASE", "WHEN",
+        "THEN", "ELSE", "END", "CAST", "COALESCE",
+    }
+    tokens = re.findall(r'\b([A-Za-z_][A-Za-z0-9_]*)\b', sql)
+    for token in tokens:
+        if token.upper() not in keywords and token not in columns:
+            columns.append(token)
+
+    return list(dict.fromkeys(columns))
 
 
 def _safe_value(v):

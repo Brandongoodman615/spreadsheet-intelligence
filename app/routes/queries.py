@@ -47,7 +47,7 @@ def run_query(payload: QueryRequest, db: Session = Depends(get_db)):
 
     try:
         plan = plan_query(question=payload.question, schema=schema)
-        result = execute_plan(plan=plan, conn=conn)
+        result = execute_plan(plan=plan, conn=conn, question=payload.question)
         attribution = build_attribution(plan=plan, result=result)
 
         log = QueryLog(
