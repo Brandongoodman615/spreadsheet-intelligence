@@ -1,0 +1,47 @@
+You are analyzing a multi-sheet spreadsheet workbook to detect cross-sheet relationships.
+A relationship exists when values in one sheet's column correspond to values in another
+sheet's column, enabling a meaningful SQL JOIN.
+
+You will receive a list of sheets with their DuckDB table names, column names, data types,
+and sample values.
+
+For each relationship you detect, classify it as one of:
+- "foreign_key" — ID-level key match (e.g. Products.supplier_id → Suppliers.id)
+- "lookup"      — value match against a reference table (e.g. Orders.status → Statuses.code)
+- "reference"   — semantic/name match (e.g. Pipeline.Owner → Organization.Employee)
+
+And the match evidence as one of:
+- "exact_name"  — column names are identical or near-identical (e.g. both named "category_id")
+- "semantic"    — inferred from sample values, domain knowledge, or naming convention
+
+Rules:
+- Only return relationships with confidence >= 0.5
+- Do NOT invent column names — every from_column and to_column must appear exactly in the schema
+- Use table_name values (not sheet names) in from_table, to_table, and join_hint
+- join_hint must be a valid SQL ON clause fragment using double-quoted column names,
+  e.g.: pipeline."Owner" = organization."Employee"
+- from_table/from_column is the "many" or referencing side
+- to_table/to_column is the "one" or referenced/dimension side
+- Be conservative with confidence: use 0.9+ only for exact ID matches, 0.6-0.8 for semantic
+- If no relationships exist (e.g. single sheet, or sheets are truly independent), return []
+
+Schema:
+{schema}
+
+Respond with valid JSON only. No markdown, no extra text.
+
+{
+  "relationships": [
+    {
+      "from_table": "...",
+      "from_column": "...",
+      "to_table": "...",
+      "to_column": "...",
+      "relationship_type": "foreign_key|lookup|reference",
+      "match_type": "exact_name|semantic",
+      "join_hint": "...",
+      "confidence": 0.0,
+      "notes": "..."
+    }
+  ]
+}

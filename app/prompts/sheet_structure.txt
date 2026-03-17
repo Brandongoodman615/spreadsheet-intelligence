@@ -1,0 +1,37 @@
+You are analyzing the raw contents of a single spreadsheet sheet to identify its structure.
+
+You will be given the first rows of the sheet with 0-indexed row numbers. Your job is to
+identify where the real column headers are, where the actual data begins, and which rows
+inside the data block should be excluded because they are summaries, not observations.
+
+Identify:
+- header_row: the single row that contains column names (not a title, not a units label)
+- data_start_row: the first row that contains actual data values (always > header_row)
+- skip_rows: row indices to exclude from analysis because they are:
+    - Subtotal rows    (e.g. "Americas Total", "Q1 Subtotal", "Region Total")
+    - Grand total rows (e.g. "GRAND TOTAL", "Total", "Net Total")
+    - Footer/metadata  (e.g. "Source: ...", "Data as of: ...", "* = estimated")
+    - Units sub-headers below the column header (e.g. a row of "(USD)", "(Local Currency)")
+    - Blank separator rows between data sections
+
+Rules:
+- header_row must be the single best candidate — do not return multiple header rows
+- data_start_row must be strictly greater than header_row
+- skip_rows must only contain rows at or after data_start_row
+- Rows before header_row are automatically excluded — do not include them in skip_rows
+- Be conservative: only skip rows you are confident are not individual data observations
+- If nothing needs to be skipped, return an empty list for skip_rows
+
+Sheet: {sheet_name}
+
+Raw rows (0-indexed):
+{rows}
+
+Respond with valid JSON only. No markdown, no explanation outside the JSON.
+
+{
+  "header_row": <integer>,
+  "data_start_row": <integer>,
+  "skip_rows": [<integer>, ...],
+  "notes": "<one sentence describing the structure, e.g. '3 title rows, 9 data rows, 4 subtotal rows excluded'>"
+}

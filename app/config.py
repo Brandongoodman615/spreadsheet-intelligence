@@ -6,6 +6,7 @@ class Settings(BaseSettings):
     database_url: str
     openai_api_key: str
     chat_model: str = "gpt-4o"
+    structure_model: str = "gpt-4o-mini"
     embedding_model: str = "text-embedding-3-small"
     app_env: str = "development"
     secret_key: str = "change-me-in-production"

@@ -1,5 +1,23 @@
+from datetime import datetime
+from typing import Any, Literal
 from pydantic import BaseModel
-from typing import Any
+
+
+class SheetRelationship(BaseModel):
+    from_table: str
+    from_column: str
+    to_table: str
+    to_column: str
+    relationship_type: Literal["foreign_key", "lookup", "reference"]
+    match_type: Literal["exact_name", "semantic"]
+    join_hint: str   # ready-to-use SQL ON clause, e.g. pipeline."Owner" = organization."Employee"
+    confidence: float
+    notes: str = ""
+
+
+class WorkbookRelationships(BaseModel):
+    detected_at: datetime
+    relationships: list[SheetRelationship] = []
 
 
 class ColumnSchema(BaseModel):
@@ -7,6 +25,7 @@ class ColumnSchema(BaseModel):
     dtype: str
     sample_values: list[Any]
     null_count: int
+    hints: list[str] = []  # e.g. ["percent_strings", "currency_strings", "date_strings"]
 
 
 class SheetSchema(BaseModel):
