@@ -1,17 +1,16 @@
+from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
+from pydantic import BaseModel
 from app.database import get_db
 from app.models.workbook import Workbook
 from app.models.query_log import QueryLog
 from app.services.query_planner import plan_query
 from app.services.query_executor import execute_plan
-from app.services.attribution_builder import build_attribution
 from app.services.duckdb_registry import get_connection, is_registered, register_workbook
 from app.services.workbook_loader import load_workbook
 from app.services.embedding_service import find_relevant_sheets
-from pathlib import Path
-from pydantic import BaseModel
 
 
 router = APIRouter(prefix="/queries", tags=["queries"])
@@ -48,14 +47,13 @@ def run_query(payload: QueryRequest, db: Session = Depends(get_db)):
     try:
         plan = plan_query(question=payload.question, schema=schema)
         result = execute_plan(plan=plan, conn=conn, question=payload.question)
-        attribution = build_attribution(plan=plan, result=result)
 
         log = QueryLog(
             workbook_id=payload.workbook_id,
             question=payload.question,
             generated_sql=plan.sql,
             answer_raw=str(result.answer),
-            attribution_json=attribution.model_dump(),
+            attribution_json=result.attribution.model_dump(),
         )
         db.add(log)
         db.commit()

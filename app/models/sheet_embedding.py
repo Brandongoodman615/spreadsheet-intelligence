@@ -9,7 +9,7 @@ class SheetEmbedding(Base):
     __tablename__ = "sheet_embeddings"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    workbook_id: Mapped[int] = mapped_column(Integer, ForeignKey("workbooks.id"), index=True)
+    workbook_id: Mapped[int] = mapped_column(Integer, ForeignKey("workbooks.id", ondelete="CASCADE"), index=True)
     sheet_name: Mapped[str] = mapped_column(String(255))
     table_name: Mapped[str] = mapped_column(String(255))
     description: Mapped[str] = mapped_column(Text)          # human-readable text that was embedded

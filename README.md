@@ -2,8 +2,6 @@
 
 Upload an Excel workbook and query it in plain English. Get exact answers backed by SQL — no guesswork, no hallucinated numbers.
 
-![Spreadsheet Intelligence UI](docs/screenshot.png)
-
 ---
 
 ## How it works
@@ -81,7 +79,7 @@ CHAT_MODEL=gpt-4o
 EMBEDDING_MODEL=text-embedding-3-small
 SECRET_KEY=change-me-in-production
 UPLOAD_DIR=uploads
-MAX_UPLOAD_SIZE_MB=10
+MAX_UPLOAD_SIZE_MB=50
 ```
 
 ### 4. Set up Postgres with pgvector
@@ -194,7 +192,7 @@ The `uploads/` directory stores the original `.xlsx` files on disk. In productio
 ## Known limitations
 
 - **Formula support**: Excel formulas are detected but executed values are used (not recalculated). Formulas that depend on external data sources will not work.
-- **File size**: Default limit is 10MB. Adjust `MAX_UPLOAD_SIZE_MB` in `.env`.
+- **File size**: Default limit is 50MB. Adjust `MAX_UPLOAD_SIZE_MB` in `.env`.
 - **Supported formats**: `.xlsx` only. `.xls` and `.csv` are not supported.
 - **DuckDB is in-memory**: Workbook data is re-loaded from disk on server restart. There is no persistent DuckDB state.
 - **Single-server only**: The DuckDB registry is an in-process dict. Horizontal scaling requires a shared cache layer (e.g. Redis + DuckDB file per workbook).

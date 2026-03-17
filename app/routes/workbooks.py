@@ -1,5 +1,4 @@
 import uuid
-import shutil
 from pathlib import Path
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
 from fastapi.responses import JSONResponse
@@ -9,7 +8,7 @@ from app.config import settings
 from app.models.workbook import Workbook
 from app.services.workbook_loader import load_workbook
 from app.services.schema_profiler import profile_workbook
-from app.services.duckdb_registry import register_workbook
+from app.services.duckdb_registry import register_workbook, is_registered
 from app.services.embedding_service import embed_workbook_schema
 
 router = APIRouter(prefix="/workbooks", tags=["workbooks"])
@@ -75,7 +74,6 @@ def get_workbook(workbook_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Workbook not found.")
 
     # Re-register in DuckDB if not already loaded (e.g. after server restart)
-    from app.services.duckdb_registry import is_registered
     if not is_registered(workbook_id):
         frames = load_workbook(Path(workbook.upload_path))
         register_workbook(workbook_id=workbook_id, frames=frames)
