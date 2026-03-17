@@ -10,6 +10,7 @@ from app.models.workbook import Workbook
 from app.services.workbook_loader import load_workbook
 from app.services.schema_profiler import profile_workbook
 from app.services.duckdb_registry import register_workbook
+from app.services.embedding_service import embed_workbook_schema
 
 router = APIRouter(prefix="/workbooks", tags=["workbooks"])
 
@@ -47,6 +48,7 @@ async def upload_workbook(file: UploadFile = File(...), db: Session = Depends(ge
     db.refresh(record)
 
     register_workbook(workbook_id=record.id, frames=frames)
+    embed_workbook_schema(workbook_id=record.id, schema=schema.model_dump(), db=db)
 
     return JSONResponse({"id": record.id, "schema": schema.model_dump()})
 

@@ -21,5 +21,5 @@ def get_db():
 
 def create_tables():
     """Create all tables. Called on app startup. Use Alembic for migrations in production."""
-    from app.models import workbook, query_log  # noqa: ensure models are registered
+    from app.models import workbook, query_log, sheet_embedding  # noqa: ensure models are registered
     Base.metadata.create_all(bind=engine)

@@ -19,10 +19,10 @@ def plan_query(question: str, schema: dict) -> QueryPlan:
     # intermediate results or joins across multiple sheets.
     """
     schema_summary = _build_schema_summary(schema)
-    prompt = _prompt_template.format(schema=schema_summary, question=question)
+    prompt = _prompt_template.replace("{schema}", schema_summary).replace("{question}", question)
 
     response = _client.chat.completions.create(
-        model=settings.openai_model,
+        model=settings.chat_model,
         max_tokens=1024,
         response_format={"type": "json_object"},
         messages=[{"role": "user", "content": prompt}],
