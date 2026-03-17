@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+env/
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Environment
+.env
+
+# Uploads (don't commit user data)
+uploads/
+
+# DuckDB files
+*.duckdb
+*.duckdb.wal
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Alembic
+alembic/versions/*.pyc
