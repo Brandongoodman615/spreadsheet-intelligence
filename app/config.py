@@ -5,7 +5,10 @@ from pathlib import Path
 class Settings(BaseSettings):
     database_url: str
     openai_api_key: str
-    openai_model: str = "gpt-4o"
+    chat_model: str = "gpt-4o"
+    embedding_model: str = "text-embedding-3-small"
+    app_env: str = "development"
+    secret_key: str = "change-me-in-production"
     upload_dir: str = "./uploads"
     max_upload_size_mb: int = 50
 

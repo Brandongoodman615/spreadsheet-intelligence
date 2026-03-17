@@ -13,3 +13,4 @@ duckdb==1.1.1
 openai==1.57.0
 python-dotenv==1.0.1
 aiofiles==24.1.0
+pgvector==0.3.2
