@@ -1,0 +1,96 @@
+.home {
+  display: flex;
+  flex-direction: column;
+  gap: 32px;
+}
+
+.home__hero {
+  text-align: center;
+  padding: 16px 0;
+}
+
+.home__title {
+  font-size: 36px;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+  margin-bottom: 12px;
+}
+
+.home__subtitle {
+  font-size: 16px;
+  color: var(--color-text-muted);
+  max-width: 480px;
+  margin: 0 auto;
+  line-height: 1.6;
+}
+
+.home__section-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 12px;
+}
+
+.home__loading,
+.home__empty {
+  color: var(--color-text-muted);
+  font-size: 14px;
+}
+
+/* Workbook list */
+.workbook-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.workbook-list__item {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 16px;
+  text-decoration: none;
+  color: inherit;
+  transition: box-shadow 0.15s, border-color 0.15s;
+}
+
+.workbook-list__item:hover {
+  border-color: var(--color-primary);
+  box-shadow: var(--shadow-md);
+}
+
+.workbook-list__icon {
+  font-size: 24px;
+  flex-shrink: 0;
+}
+
+.workbook-list__info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.workbook-list__name {
+  font-weight: 500;
+  font-size: 15px;
+  color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workbook-list__meta {
+  font-size: 13px;
+  color: var(--color-text-muted);
+}
+
+.workbook-list__date {
+  font-size: 13px;
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+}

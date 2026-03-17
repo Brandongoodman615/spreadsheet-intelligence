@@ -64,9 +64,12 @@ def _extract_table(df: pd.DataFrame, sheet_name: str) -> pd.DataFrame | None:
     if df.empty:
         return None
 
-    # Coerce types: try numeric conversion on object columns
+    # Coerce types: try numeric conversion on object columns.
+    # Only apply if conversion introduces no new NaN values (mirrors old errors="ignore" behavior).
     for col in df.select_dtypes(include="object").columns:
-        df[col] = pd.to_numeric(df[col], errors="ignore")
+        converted = pd.to_numeric(df[col], errors="coerce")
+        if converted.isna().sum() == df[col].isna().sum():
+            df[col] = converted
 
     return df
 
