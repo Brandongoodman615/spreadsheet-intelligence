@@ -33,3 +33,6 @@ test_files/
 
 # Alembic
 alembic/versions/*.pyc
+
+# Local notes
+tmp/
