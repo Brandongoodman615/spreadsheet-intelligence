@@ -1,61 +1,91 @@
+import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-import pandas as pd
 import openpyxl
+import pandas as pd
+from app.services.sheet_structure_analyzer import analyze_sheet_structure
+from app.services.workbook_scanner import SheetScan, scan_workbook, build_raw_dataframe
 
 
 def load_workbook(path: Path) -> dict[str, pd.DataFrame]:
     """
     Load all sheets from an .xlsx file into a dict of DataFrames.
 
+    Opens the file once with openpyxl to extract both cell values and rich
+    structural metadata (bold rows, merged regions, named ranges, print areas).
+    This metadata is passed to the per-sheet structure analyzer so the LLM has
+    explicit layout signals rather than guessing from a flat cell dump.
+
     Uses data_only=True so formula cells return their last cached value.
     Does NOT recalculate formulas — see README known limitations.
 
-    # Future: detect and handle multi-table sheets, named ranges,
-    # merged headers, and non-rectangular data layouts.
+    Sheet structure detection (LLM calls) runs in parallel across all sheets
+    since each sheet is independent. DataFrame cleaning then runs sequentially
+    using the pre-computed structures.
     """
-    frames: dict[str, pd.DataFrame] = {}
+    wb = openpyxl.load_workbook(path, data_only=True)
+    workbook_scan = scan_workbook(wb)
 
-    raw = pd.read_excel(path, sheet_name=None, engine="openpyxl", header=None)
+    # Build raw DataFrames from the already-open workbook
+    raw: dict[str, pd.DataFrame] = {
+        ws.title: build_raw_dataframe(ws) for ws in wb.worksheets
+    }
 
+    # Pre-clean each sheet (drop fully empty rows/cols) before sending to LLM.
+    # Replace '' with NA first — openpyxl returns empty strings for explicitly-empty
+    # cells, which pandas does not treat as null without this step.
+    precleaned: dict[str, pd.DataFrame] = {}
     for sheet_name, df in raw.items():
-        cleaned = _extract_table(df, sheet_name)
+        df = df.replace('', pd.NA).dropna(how="all").dropna(axis=1, how="all").reset_index(drop=True)
+        if not df.empty:
+            precleaned[sheet_name] = df
+
+    # Analyze all sheets in parallel — each is an independent LLM call
+    structures = {}
+    with ThreadPoolExecutor(max_workers=min(len(precleaned), 8)) as executor:
+        futures = {
+            executor.submit(
+                analyze_sheet_structure,
+                df,
+                name,
+                workbook_scan.sheets.get(name),
+            ): name
+            for name, df in precleaned.items()
+        }
+        for future in as_completed(futures):
+            name = futures[future]
+            structures[name] = future.result()
+
+    # Extract clean DataFrames using the pre-computed structures
+    frames: dict[str, pd.DataFrame] = {}
+    for sheet_name, df in precleaned.items():
+        cleaned = _extract_table(df, sheet_name, structures[sheet_name])
         if cleaned is not None:
             frames[sheet_name] = cleaned
 
     return frames
 
 
-def _extract_table(df: pd.DataFrame, sheet_name: str) -> pd.DataFrame | None:
+def _extract_table(df: pd.DataFrame, sheet_name: str, structure) -> pd.DataFrame | None:
     """
     Find the best header row and return clean tabular data.
 
-    Handles: leading title rows, empty rows, merged header cells, fully empty sheets.
-
-    Strategy: use the row with the highest non-null cell count as the header.
-    Title rows (e.g. "Acme Corporation", "Sales Report - H1 2024") typically
-    have only one populated cell, while real header rows span all columns.
+    Receives a pre-computed SheetStructure from the parallel LLM analysis step.
+    Handles any layout: leading title rows, merged cell group headers, embedded
+    subtotals, trailing metadata, duplicate column names, currency symbols,
+    and percentage strings.
     """
     if df.empty:
         return None
 
-    # Drop fully empty rows and columns
-    df = df.dropna(how="all").dropna(axis=1, how="all")
-
-    if df.empty:
-        return None
-
-    # Find the header row: first row with non-null count >= 50% of the max.
-    # Title rows (e.g. "Acme Corporation") have 1 populated cell; header rows
-    # have most cells populated. Using a threshold instead of strict max handles
-    # cases where a header row has one blank cell (e.g. a formula column with no label).
-    non_null_counts = df.notna().sum(axis=1)
-    threshold = max(1, non_null_counts.max() * 0.5)
-    header_idx = non_null_counts[non_null_counts >= threshold].index[0]
-
+    header_idx = structure.header_row
     raw_cols = [
-        str(df.loc[header_idx, c]).strip() if pd.notna(df.loc[header_idx, c]) else f"col_{i}"
+        str(df.loc[header_idx, c]).strip()
+        if pd.notna(df.loc[header_idx, c]) and str(df.loc[header_idx, c]).strip() != ""
+        else f"col_{i}"
         for i, c in enumerate(df.columns)
     ]
+
     # Deduplicate column names to avoid ambiguous DataFrame[col] lookups
     seen: dict[str, int] = {}
     deduped = []
@@ -66,23 +96,260 @@ def _extract_table(df: pd.DataFrame, sheet_name: str) -> pd.DataFrame | None:
         else:
             seen[name] = 0
             deduped.append(name)
-    df.columns = deduped
-    df = df.loc[header_idx + 1:].reset_index(drop=True)
 
-    # Drop rows that are entirely empty after header extraction
+    df.columns = deduped
+
+    # Apply LLM-inferred names for blank header columns (e.g. col_7 → Revenue)
+    if structure.column_renames:
+        df.rename(columns=structure.column_renames, inplace=True)
+
+    # Keep only rows from data_start_row onward, excluding skip_rows
+    data_rows = df.loc[structure.data_start_row:]
+    if structure.skip_rows:
+        data_rows = data_rows.drop(
+            index=[r for r in structure.skip_rows if r in data_rows.index],
+            errors="ignore",
+        )
+    df = data_rows.reset_index(drop=True)
+
+    # Normalize empty strings to NaN so dropna and forward-fill work correctly.
+    # openpyxl returns '' for explicitly-empty cells in merged regions; pandas
+    # does not treat '' as null, which breaks both dropna and sparse-column detection.
+    df = df.replace('', pd.NA)
+
+    # Drop rows that are entirely empty
     df = df.dropna(how="all")
 
     if df.empty:
         return None
 
+    # Drop units/descriptor rows that appear at the top of the data block.
+    # These are rows immediately below the header where all non-null values are
+    # parenthetical labels like "(USD)", "(Local)", "(Expected)" — a common Excel
+    # convention for annotating column units or sub-headers.
+    df = _strip_leading_descriptor_rows(df)
+
+    if df.empty:
+        return None
+
+    # Drop any trailing metadata rows the LLM may have missed.
+    # This is a lightweight safety net for footers that appear after the last
+    # data row and were outside the LLM's sample window.
+    df = _strip_trailing_metadata(df)
+
+    if df.empty:
+        return None
+
+    # Forward-fill sparse columns.
+    # Some sheets use merged cells for group headers (e.g. "Americas" spanning 3 rows,
+    # "SALES" spanning a budget section). After parsing, these appear as NaN in all
+    # but the first row of the group. Forward-fill restores the grouping so SQL
+    # GROUP BY and WHERE work correctly.
+    df = _forward_fill_sparse_columns(df)
+
+    # Clean string values: strip currency symbols, annotation characters, and
+    # comma formatting so numeric columns can be cast correctly in SQL.
+    for col in df.select_dtypes(include="object").columns:
+        df[col] = df[col].map(_clean_cell_value)
+
+    # Normalize percent columns to uniform decimal floats BEFORE type coercion.
+    # Handles mixed columns where some cells are "75%" strings and others are
+    # already-decimal floats (e.g. 0.65). Normalizes everything to [0, 1] range.
+    df = _normalize_percent_columns(df)
+
     # Coerce types: try numeric conversion on object columns.
-    # Only apply if conversion introduces no new NaN values (mirrors old errors="ignore" behavior).
+    # Only apply if conversion introduces no new NaN values (mirrors old errors="ignore").
     for col in df.select_dtypes(include="object").columns:
         converted = pd.to_numeric(df[col], errors="coerce")
         if converted.isna().sum() == df[col].isna().sum():
             df[col] = converted
 
+    # Drop group-header rows: rows where every numeric column is NaN.
+    # These are merged-cell section labels (e.g. "Sales" spanning a department block)
+    # that carry no data values. Identifier columns are forward-filled so they remain
+    # correct in the rows that do have data.
+    numeric_cols = df.select_dtypes(include="number").columns
+    if len(numeric_cols) > 0:
+        df = df[~df[numeric_cols].isna().all(axis=1)]
+
+    return df.reset_index(drop=True)
+
+
+def _strip_leading_descriptor_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Remove units/descriptor rows at the top of the data block.
+
+    Targets rows immediately below the header where every non-null value is a
+    parenthetical label — e.g. "(USD)", "(Local)", "(Expected)", "(Revised)".
+    This is a standard Excel convention for annotating column units or sub-headers
+    and is not data.
+
+    Only strips contiguous matching rows from the top; stops at the first row
+    that contains any non-parenthetical value.
+    """
+    paren_re = re.compile(r'^\(.*\)$')
+
+    drop_up_to = 0
+    for i, (_, row) in enumerate(df.iterrows()):
+        non_null = row.dropna()
+        if non_null.empty:
+            drop_up_to = i + 1
+            continue
+        all_parens = all(paren_re.match(str(v).strip()) for v in non_null)
+        if all_parens:
+            drop_up_to = i + 1
+        else:
+            break
+
+    return df.iloc[drop_up_to:].reset_index(drop=True)
+
+
+def _strip_trailing_metadata(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Remove footer rows that appear after the main data block.
+
+    Detects rows where >60% of columns are null AND the first non-null value
+    is a string that looks like a label or annotation rather than data.
+    Strips from the bottom up until a clean data row is found.
+    """
+    if df.empty:
+        return df
+
+    col_count = len(df.columns)
+    last_good = len(df)
+
+    for i in range(len(df) - 1, -1, -1):
+        row = df.iloc[i]
+        null_ratio = row.isna().sum() / col_count
+        if null_ratio < 0.6:
+            break
+        # High null ratio — check if first non-null looks like metadata
+        non_null = row.dropna()
+        if non_null.empty:
+            last_good = i
+            continue
+        first_val = str(non_null.iloc[0]).strip()
+        # Metadata patterns: starts with common label prefixes, or is very long prose
+        if re.match(r"^(data as of|source:|note:|w\d+\s*=|updated|last|version|\*)", first_val, re.IGNORECASE) \
+                or len(first_val) > 60:
+            last_good = i
+        # Numeric-only trailing rows are grand totals (e.g. a single sum cell at the bottom)
+        elif all(isinstance(v, (int, float)) for v in non_null):
+            last_good = i
+        else:
+            break
+
+    return df.iloc[:last_good].reset_index(drop=True)
+
+
+def _normalize_percent_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Convert percent-string columns to uniform decimal floats.
+
+    Handles mixed columns where some cells are "75%" strings and others are
+    already-decimal floats (e.g. 0.65 for 65%). Normalizes everything to [0, 1]
+    so queries can use the column directly without SQL REPLACE/divide gymnastics.
+
+    A column qualifies if ≥50% of its non-null string values end with '%'.
+    """
+    for col in df.select_dtypes(include="object").columns:
+        non_null = df[col].dropna()
+        if non_null.empty:
+            continue
+
+        str_vals = non_null[non_null.apply(lambda x: isinstance(x, str))]
+        if str_vals.empty:
+            continue
+
+        pct_frac = str_vals.astype(str).str.match(r'^-?\d+(\.\d+)?%$').sum() / len(non_null)
+        if pct_frac < 0.5:
+            continue
+
+        def _to_decimal(v, _col=col):
+            if pd.isna(v):
+                return v
+            if isinstance(v, (int, float)):
+                f = float(v)
+                # Float already in [0, 1] is a decimal; larger values are raw percentages
+                return f if abs(f) <= 1.0 else f / 100.0
+            s = str(v).strip()
+            if s.endswith('%'):
+                try:
+                    return float(s[:-1]) / 100.0
+                except ValueError:
+                    return None
+            try:
+                f = float(s)
+                return f if abs(f) <= 1.0 else f / 100.0
+            except ValueError:
+                return v
+
+        df[col] = df[col].map(_to_decimal)
+
     return df
+
+
+def _forward_fill_sparse_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Forward-fill columns that are sparsely populated due to merged cell groups.
+
+    Only fills columns where:
+    - dtype is object (text grouping columns, not numeric data)
+    - At least 30% of values are blank (null or empty string)
+
+    Treats empty strings as blanks — openpyxl returns '' for explicitly-empty
+    cells in merged regions, which isna() would otherwise miss.
+
+    This handles sheets like Revenue (Region: Americas/EMEA/APAC spanning rows)
+    and Budgets (Department: SALES/MARKETING/ENGINEERING spanning line items).
+    """
+    for col in df.select_dtypes(include="object").columns:
+        normalized = df[col].replace('', pd.NA)
+        null_ratio = normalized.isna().sum() / len(df)
+        if null_ratio >= 0.3:
+            df[col] = normalized.ffill().infer_objects(copy=False)
+    return df
+
+
+def _clean_cell_value(val):
+    """
+    Clean a single cell value for reliable numeric coercion.
+
+    Handles:
+    - Currency symbols: $1,234.56 → 1234.56, €88,500 → 88500
+    - Percentage strings: "75%" → "75" (dtype hint preserved in schema)
+    - Comma-formatted numbers: "1,234,567" → "1234567"
+    - Annotated values: "158,300*" → "158300"
+    - Sub-header labels like "(USD)", "(Local)" → kept as-is (non-numeric)
+    - Whitespace-padded hierarchy strings: "  Finance" → "Finance"
+    """
+    if not isinstance(val, str):
+        return val
+
+    stripped = val.strip()
+
+    # Strip leading/trailing whitespace from hierarchy-indented labels
+    if stripped != val:
+        val = stripped
+
+    # Normalize ALL-CAPS label words to Title Case (e.g. ENGINEERING → Engineering).
+    # Common in Excel for department/category headers. Only applies to purely alphabetic
+    # words — leaves codes (EMP-001, USD, CAT-HW) and mixed-case strings unchanged.
+    if stripped.isupper() and stripped.replace(' ', '').isalpha():
+        return stripped.title()
+
+    # Remove annotation suffix (* means estimated/restated)
+    cleaned = re.sub(r'\*+$', '', stripped)
+
+    # Strip currency symbols and formatting
+    cleaned = re.sub(r'^[€£¥₹₩]', '', cleaned)
+    cleaned = re.sub(r'^\$', '', cleaned)
+
+    # Remove comma formatting in numbers (e.g. "1,234,567")
+    if re.match(r'^-?[\d,]+(\.\d+)?$', cleaned):
+        cleaned = cleaned.replace(',', '')
+
+    return cleaned if cleaned != '' else None
 
 
 def has_formula_cells(path: Path) -> bool:

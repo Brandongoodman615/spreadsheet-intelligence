@@ -44,9 +44,23 @@ def run_query(payload: QueryRequest, db: Session = Depends(get_db)):
     )
     schema = _filter_schema(workbook.schema_json, relevant_sheets)
 
+    relationships = workbook.relationships_json
+
     try:
-        plan = plan_query(question=payload.question, schema=schema)
-        result = execute_plan(plan=plan, conn=conn, question=payload.question)
+        plan = plan_query(question=payload.question, schema=schema, relationships=relationships)
+
+        try:
+            result = execute_plan(plan=plan, conn=conn, question=payload.question)
+        except ValueError as sql_err:
+            # SQL failed — send the error back to the LLM for one self-correction attempt.
+            # This handles cases like type mismatches, bad casts, or unexpected column values.
+            plan = plan_query(
+                question=payload.question,
+                schema=schema,
+                relationships=relationships,
+                sql_error=str(sql_err),
+            )
+            result = execute_plan(plan=plan, conn=conn, question=payload.question)
 
         log = QueryLog(
             workbook_id=payload.workbook_id,

@@ -7,6 +7,17 @@ export default function AnswerCard({ result }) {
   const isTable = Array.isArray(result.answer)
   const isSingleValue = result.answer !== null && !isTable
 
+  const formatScalar = (val) => {
+    if (typeof val === 'number') {
+      // Clean up floating point noise (e.g. 250885.99999999997 → 250,886)
+      const rounded = Math.round(val * 1e9) / 1e9
+      return Number.isInteger(rounded)
+        ? rounded.toLocaleString()
+        : rounded.toLocaleString(undefined, { maximumFractionDigits: 4 })
+    }
+    return String(val)
+  }
+
   return (
     <article className="answer-card card" aria-label={`Answer to: ${result.question}`}>
       <div className="answer-card__question">
@@ -19,7 +30,7 @@ export default function AnswerCard({ result }) {
           <p className="answer-card__empty">No results found.</p>
         ) : isSingleValue ? (
           <div className="answer-card__value" aria-live="polite">
-            <span className="answer-card__big-value">{String(result.answer)}</span>
+            <span className="answer-card__big-value">{formatScalar(result.answer)}</span>
           </div>
         ) : (
           <div className="answer-card__table-wrapper" role="region" aria-label="Query results">

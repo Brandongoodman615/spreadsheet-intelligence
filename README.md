@@ -6,22 +6,59 @@ Upload an Excel workbook and query it in plain English. Get exact answers backed
 
 ## How it works
 
-1. **Upload** an `.xlsx` file — the app parses every sheet, profiles the schema, and stores embeddings of each sheet's structure in Postgres.
-2. **Ask a question** in natural language — GPT-4o translates your intent into SQL using only the relevant sheets (found via vector similarity search).
-3. **DuckDB executes the SQL** against the actual data and returns an exact answer. The LLM never does arithmetic.
-
 ```
+Upload .xlsx
+     │
+     ▼
+gpt-4o-mini analyzes raw sheet layout
+(header row, data start, rows to skip)
+     │
+     ▼
+Schema profiled → column types, hints, sample values
+     │
+     ▼
+gpt-4o detects cross-sheet relationships
+(foreign keys, lookups, semantic joins)
+     │
+     ▼
+text-embedding-3-small embeds each sheet → pgvector
+     │
+     ▼  (at query time)
+     │
 User question
      │
      ▼
-pgvector similarity search  →  relevant sheets
+pgvector retrieves relevant sheets
      │
      ▼
-GPT-4o (schema + question)  →  SQL
+gpt-4o generates SQL (schema + relationships + question)
      │
      ▼
-DuckDB executes SQL          →  exact answer
+DuckDB executes SQL → exact answer
 ```
+
+### Why SQL instead of asking the LLM to compute the answer
+
+The LLM translates intent into SQL. DuckDB executes it. This means:
+- Numbers are **always exact** — DuckDB does the arithmetic, not the LLM
+- Answers are **verifiable** — the generated SQL is shown alongside every result
+- Large datasets are handled without stuffing rows into the context window
+
+---
+
+## Key design decisions
+
+### AI-assisted sheet structure detection
+Excel files are presentation documents, not databases. They contain title rows, merged cell headers, embedded subtotals, footer annotations, and units sub-rows. Rather than hardcoding heuristics for each pattern, the app sends a raw sample of each sheet to `gpt-4o-mini` at upload time. The model identifies the true header row, data start row, and any rows to skip (subtotals, grand totals, metadata). A heuristic fallback handles the rare case where the LLM call fails — upload never breaks.
+
+### Cross-sheet relationship graph
+After profiling the schema, `gpt-4o` analyzes all sheets together to detect join-able relationships (e.g. `sales.Product ID → products.Product ID`, `sales.Sales Rep ID → employees.Rep ID`). These are stored on the workbook record and injected into the query planner's context. The query planner can then write JOIN queries automatically when a question spans multiple sheets — without the user needing to know the table structure.
+
+### RAG for schema retrieval
+Each sheet's schema is embedded with `text-embedding-3-small` and stored in pgvector. At query time, the question is embedded and the most semantically relevant sheets are retrieved. This keeps the prompt focused on relevant context rather than dumping the full workbook schema, which matters for workbooks with many sheets.
+
+### Dirty data handling
+Real-world Excel files have currency symbols (`$1,234`), percentage strings (`75%`), all-caps labels (`ENGINEERING`), and mixed numeric formats. The loader normalizes these at parse time so DuckDB sees clean typed columns. Column-level hints (e.g. `currency_strings`, `date_strings`, `numeric_as_text`) are passed to the query planner for any remaining edge cases.
 
 ---
 
@@ -35,7 +72,9 @@ DuckDB executes SQL          →  exact answer
 | Query engine | DuckDB (in-memory) |
 | Excel parsing | pandas + openpyxl |
 | Embeddings | OpenAI `text-embedding-3-small` |
+| Structure detection | OpenAI `gpt-4o-mini` (once per sheet at upload) |
 | Query planning | OpenAI `gpt-4o` |
+| Relationship detection | OpenAI `gpt-4o` (once per workbook at upload) |
 | Migrations | Alembic |
 
 ---
@@ -73,9 +112,10 @@ cp .env.example .env
 Edit `.env`:
 
 ```env
-DATABASE_URL=postgresql://postgres:password@localhost:5432/spreadsheet_intelligence
+DATABASE_URL=postgresql://localhost/spreadsheet_intelligence
 OPENAI_API_KEY=sk-...
 CHAT_MODEL=gpt-4o
+STRUCTURE_MODEL=gpt-4o-mini
 EMBEDDING_MODEL=text-embedding-3-small
 SECRET_KEY=change-me-in-production
 UPLOAD_DIR=uploads
@@ -85,11 +125,8 @@ MAX_UPLOAD_SIZE_MB=50
 ### 4. Set up Postgres with pgvector
 
 ```bash
-# Create the database
-psql -U postgres -c "CREATE DATABASE spreadsheet_intelligence;"
-
-# Enable pgvector extension
-psql -U postgres -d spreadsheet_intelligence -c "CREATE EXTENSION IF NOT EXISTS vector;"
+createdb spreadsheet_intelligence
+psql spreadsheet_intelligence -c "CREATE EXTENSION IF NOT EXISTS vector;"
 ```
 
 ### 5. Run database migrations
@@ -104,7 +141,7 @@ alembic upgrade head
 uvicorn app.main:app --reload
 ```
 
-API is available at `http://localhost:8000`. Swagger docs at `http://localhost:8000/docs`.
+API available at `http://localhost:8000`. Swagger docs at `http://localhost:8000/docs`.
 
 ### 7. Start the frontend
 
@@ -115,7 +152,7 @@ npm install
 npm run dev
 ```
 
-Frontend is available at `http://localhost:5173`.
+Frontend available at `http://localhost:5173`.
 
 ---
 
@@ -130,72 +167,45 @@ Frontend is available at `http://localhost:5173`.
 | `GET` | `/queries/{workbook_id}/history` | Get query history for a workbook |
 | `GET` | `/health` | Health check |
 
----
+### Query request
 
-## Production deployment
-
-### Environment
-
-Set these in addition to the local env vars:
-
-```env
-APP_ENV=production
-SECRET_KEY=<strong-random-secret>
-DATABASE_URL=postgresql://user:password@your-db-host:5432/spreadsheet_intelligence
+```json
+POST /queries/
+{
+  "workbook_id": 1,
+  "question": "What are total sales by product?"
+}
 ```
 
-### Database
+### Query response
 
-Run migrations against your production database before deploying:
-
-```bash
-DATABASE_URL=postgresql://... alembic upgrade head
+```json
+{
+  "question": "What are total sales by product?",
+  "answer": [{"Product Name": "Enterprise Server Pro", "total_sales": 58498.05}, ...],
+  "sql": "SELECT p.\"Product Name\", SUM(s.\"Quantity\" * s.\"Unit Price\") ...",
+  "explanation": "Joins sales and products on Product ID, sums revenue per product.",
+  "attribution": {"sheets": ["Sales", "Products"], "rows_matched": 5}
+}
 ```
-
-Ensure the `pgvector` extension is enabled on your Postgres instance. Most managed providers (Supabase, Neon, Railway) support it natively.
-
-### API
-
-```bash
-# Install production dependencies
-pip install -r requirements.txt
-
-# Run with multiple workers
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
-```
-
-Or use gunicorn with the uvicorn worker class:
-
-```bash
-gunicorn app.main:app -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000
-```
-
-### Frontend
-
-```bash
-cd frontend
-npm install
-npm run build
-# Serve the dist/ directory with nginx, Caddy, or any static host
-```
-
-Point your reverse proxy (nginx, Caddy) at:
-- `/` → frontend `dist/` directory
-- `/workbooks`, `/queries`, `/health` → API on port 8000
-
-### Uploads
-
-The `uploads/` directory stores the original `.xlsx` files on disk. In production, replace local storage with S3 or another object store and update `settings.upload_path` accordingly.
 
 ---
 
 ## Known limitations
 
-- **Formula support**: Excel formulas are detected but executed values are used (not recalculated). Formulas that depend on external data sources will not work.
-- **File size**: Default limit is 50MB. Adjust `MAX_UPLOAD_SIZE_MB` in `.env`.
-- **Supported formats**: `.xlsx` only. `.xls` and `.csv` are not supported.
-- **DuckDB is in-memory**: Workbook data is re-loaded from disk on server restart. There is no persistent DuckDB state.
-- **Single-server only**: The DuckDB registry is an in-process dict. Horizontal scaling requires a shared cache layer (e.g. Redis + DuckDB file per workbook).
+**Multi-table sheets**: Excel sheets that contain two separate tables side-by-side or stacked are parsed as a single wide table. This affects lookup/reference sheets that combine multiple datasets in one tab.
+
+**Unnamed formula columns**: Columns whose header cell is empty (typically formula-derived totals) get assigned a generic name like `col_7`. The query planner handles this correctly in most cases by inferring the column's purpose from context and adjacent columns, but the column name won't appear meaningfully in the schema panel.
+
+**Formula recalculation**: Excel formulas are read as their last cached value (`data_only=True`). Formulas that reference external workbooks or volatile functions (`NOW()`, `TODAY()`) will show stale values.
+
+**Mixed-currency aggregation**: Workbooks where the same column contains values in multiple currencies (USD and EUR in the same column) cannot be aggregated correctly without FX conversion. The query planner is instructed to flag this rather than return a misleading total.
+
+**DuckDB is in-memory**: Workbook data is re-loaded from disk on server restart. There is no persistent DuckDB state between restarts (the data reloads automatically on first query after restart).
+
+**Single-server only**: The DuckDB registry is an in-process dict. Horizontal scaling requires a shared cache layer (e.g. Redis + DuckDB file per workbook).
+
+**File formats**: `.xlsx` only. `.xls`, `.csv`, and `.ods` are not supported.
 
 ---
 
@@ -203,26 +213,37 @@ The `uploads/` directory stores the original `.xlsx` files on disk. In productio
 
 ```
 ├── app/
-│   ├── main.py               # FastAPI app entry point
-│   ├── config.py             # Environment config (pydantic-settings)
-│   ├── database.py           # SQLAlchemy engine + session
-│   ├── models/               # SQLAlchemy models
-│   ├── schemas/              # Pydantic schemas
-│   ├── routes/               # API route handlers
-│   ├── services/             # Business logic
-│   │   ├── workbook_loader.py    # Excel parsing
-│   │   ├── schema_profiler.py    # Schema extraction
-│   │   ├── duckdb_registry.py    # In-memory DuckDB connections
-│   │   ├── embedding_service.py  # pgvector embeddings
-│   │   ├── query_planner.py      # LLM → SQL
-│   │   └── query_executor.py     # DuckDB execution
-│   └── prompts/              # LLM prompt templates
-├── alembic/                  # Database migrations
-├── frontend/                 # React + Vite app
+│   ├── main.py                      # FastAPI app, lifespan, CORS
+│   ├── config.py                    # Environment config (pydantic-settings)
+│   ├── database.py                  # SQLAlchemy engine + session
+│   ├── models/                      # SQLAlchemy ORM models
+│   ├── schemas/                     # Pydantic schemas (workbook, query, relationships)
+│   ├── routes/
+│   │   ├── workbooks.py             # Upload, list, get
+│   │   └── queries.py               # Natural language query endpoint
+│   ├── services/
+│   │   ├── workbook_loader.py       # Excel → DataFrames (AI-assisted parsing)
+│   │   ├── sheet_structure_analyzer.py  # gpt-4o-mini sheet layout detection
+│   │   ├── schema_profiler.py       # Column type inference + hints
+│   │   ├── relationship_detector.py # gpt-4o cross-sheet relationship detection
+│   │   ├── embedding_service.py     # pgvector schema embeddings
+│   │   ├── duckdb_registry.py       # In-memory DuckDB connections
+│   │   ├── query_planner.py         # LLM → SQL with schema + relationship context
+│   │   └── query_executor.py        # DuckDB execution + result formatting
+│   └── prompts/
+│       ├── query_planner.txt        # SQL generation prompt
+│       ├── sheet_structure.txt      # Sheet layout detection prompt
+│       └── relationship_detector.txt # Cross-sheet relationship prompt
+├── alembic/                         # Database migrations
+├── db/
+│   └── schema.sql                   # Current database schema (like db/schema.rb)
+├── frontend/                        # React + Vite
 │   └── src/
-│       ├── pages/            # Home, WorkbookDetail
-│       └── components/       # UploadZone, QueryChat, AnswerCard, SchemaPanel
-├── uploads/                  # Uploaded workbooks (gitignored)
+│       ├── pages/                   # Home, WorkbookDetail
+│       └── components/              # UploadZone, QueryChat, AnswerCard, SchemaPanel
+├── tests/
+│   └── test_documents/              # Sample workbooks for testing
+├── uploads/                         # Uploaded files (gitignored)
 ├── requirements.txt
 └── .env.example
 ```

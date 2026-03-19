@@ -10,6 +10,7 @@ from app.services.workbook_loader import load_workbook
 from app.services.schema_profiler import profile_workbook
 from app.services.duckdb_registry import register_workbook, is_registered
 from app.services.embedding_service import embed_workbook_schema
+from app.services.relationship_detector import detect_relationships
 
 router = APIRouter(prefix="/workbooks", tags=["workbooks"])
 
@@ -33,6 +34,9 @@ async def upload_workbook(file: UploadFile = File(...), db: Session = Depends(ge
     frames = load_workbook(dest)
     schema = profile_workbook(frames, original_name=file.filename)
 
+    # Detect cross-sheet relationships for JOIN-aware query planning
+    relationships = detect_relationships(schema)
+
     # Register DataFrames in DuckDB (keyed by workbook id — assigned after DB insert)
     record = Workbook(
         filename=unique_name,
@@ -40,6 +44,7 @@ async def upload_workbook(file: UploadFile = File(...), db: Session = Depends(ge
         upload_path=str(dest),
         sheet_count=schema.sheet_count,
         schema_json=schema.model_dump(),
+        relationships_json=relationships.model_dump(mode="json"),
         has_formulas=schema.has_formulas,
     )
     db.add(record)

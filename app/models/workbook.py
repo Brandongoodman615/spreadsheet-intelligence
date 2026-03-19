@@ -12,6 +12,7 @@ class Workbook(Base):
     original_name: Mapped[str] = mapped_column(String(255))     # user's original filename
     upload_path: Mapped[str] = mapped_column(String(500))
     sheet_count: Mapped[int] = mapped_column(Integer, default=0)
-    schema_json: Mapped[dict] = mapped_column(JSON, nullable=True)  # full WorkbookSchema
+    schema_json: Mapped[dict] = mapped_column(JSON, nullable=True)       # full WorkbookSchema
+    relationships_json: Mapped[dict] = mapped_column(JSON, nullable=True) # WorkbookRelationships
     has_formulas: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
