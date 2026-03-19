@@ -8,10 +8,13 @@ inside the data block should be excluded because they are summaries, not observa
 Identify:
 - header_row: the single row that contains column names (not a title, not a units label)
 - data_start_row: the first row that contains actual data values (always > header_row)
-- column_renames: you MUST rename every col_N placeholder that appears in the header row
-    as <empty>. Look at the data values in that column across multiple rows and the names
-    of surrounding columns to infer the most likely label. Use concise Title Case names.
-    Return an empty object {} only if every column already has a real header.
+- column_renames: Step 1 — look at the header_row you identified. For every col_N position
+    in the "Cols:" line, check if that position shows <empty> in the header_row.
+    Step 2 — for each such blank position, you MUST add an entry to column_renames mapping
+    "col_N" to an inferred label. Look at the data values in rows below the header and the
+    names of adjacent columns to infer the most likely label. Use concise Title Case names.
+    If a ⚠ annotation is present listing blank positions, those are the ones you MUST rename.
+    Return {} only if the header_row has zero <empty> positions.
 - skip_rows: row indices to exclude from analysis because they are:
     - Subtotal rows    (e.g. "Americas Total", "Q1 Subtotal", "Region Total")
     - Grand total rows (e.g. "GRAND TOTAL", "Total", "Net Total")

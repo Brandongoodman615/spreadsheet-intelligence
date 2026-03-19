@@ -16,6 +16,9 @@ build/
 # Uploads (don't commit user data)
 uploads/
 
+# Test fixtures (generated, not committed)
+test_files/
+
 # DuckDB files
 *.duckdb
 *.duckdb.wal

@@ -29,10 +29,13 @@ Your task:
     FROM budgets b JOIN actuals a ON b.dept = a.dept GROUP BY a.dept
 
   CORRECT — aggregate first, then join:
-    SELECT b.dept, b.total_budget, a.total_actual
-    FROM (SELECT dept, SUM(budget) AS total_budget FROM budgets GROUP BY dept) b
-    JOIN (SELECT dept, SUM(actual) AS total_actual FROM actuals GROUP BY dept) a
-    ON b.dept = a.dept
+    SELECT a.key, a.total_a, b.total_b, (a.total_a - b.total_b) AS variance
+    FROM (SELECT key_col, SUM(value_col) AS total_a FROM table_a GROUP BY key_col) a
+    JOIN (SELECT key_col, SUM(value_col) AS total_b FROM table_b GROUP BY key_col) b
+    ON a.key_col = b.key_col
+
+  This pattern applies to ANY comparison across two tables — variance, over/under,
+  plan vs actual, before vs after, etc. Always pre-aggregate both sides before joining.
 
 ## Handling dirty data — IMPORTANT
 
