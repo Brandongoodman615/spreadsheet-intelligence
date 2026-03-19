@@ -32,6 +32,7 @@ def plan_query(
     response = _client.chat.completions.create(
         model=settings.chat_model,
         max_tokens=1024,
+        temperature=0,
         response_format={"type": "json_object"},
         messages=[{"role": "user", "content": prompt}],
     )

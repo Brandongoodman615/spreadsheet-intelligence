@@ -1,54 +1,88 @@
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-import pandas as pd
 import openpyxl
+import pandas as pd
 from app.services.sheet_structure_analyzer import analyze_sheet_structure
+from app.services.workbook_scanner import SheetScan, scan_workbook, build_raw_dataframe
 
 
 def load_workbook(path: Path) -> dict[str, pd.DataFrame]:
     """
     Load all sheets from an .xlsx file into a dict of DataFrames.
 
+    Opens the file once with openpyxl to extract both cell values and rich
+    structural metadata (bold rows, merged regions, named ranges, print areas).
+    This metadata is passed to the per-sheet structure analyzer so the LLM has
+    explicit layout signals rather than guessing from a flat cell dump.
+
     Uses data_only=True so formula cells return their last cached value.
     Does NOT recalculate formulas — see README known limitations.
+
+    Sheet structure detection (LLM calls) runs in parallel across all sheets
+    since each sheet is independent. DataFrame cleaning then runs sequentially
+    using the pre-computed structures.
     """
-    frames: dict[str, pd.DataFrame] = {}
+    wb = openpyxl.load_workbook(path, data_only=True)
+    workbook_scan = scan_workbook(wb)
 
-    raw = pd.read_excel(path, sheet_name=None, engine="openpyxl", header=None)
+    # Build raw DataFrames from the already-open workbook
+    raw: dict[str, pd.DataFrame] = {
+        ws.title: build_raw_dataframe(ws) for ws in wb.worksheets
+    }
 
+    # Pre-clean each sheet (drop fully empty rows/cols) before sending to LLM.
+    # Replace '' with NA first — openpyxl returns empty strings for explicitly-empty
+    # cells, which pandas does not treat as null without this step.
+    precleaned: dict[str, pd.DataFrame] = {}
     for sheet_name, df in raw.items():
-        cleaned = _extract_table(df, sheet_name)
+        df = df.replace('', pd.NA).dropna(how="all").dropna(axis=1, how="all").reset_index(drop=True)
+        if not df.empty:
+            precleaned[sheet_name] = df
+
+    # Analyze all sheets in parallel — each is an independent LLM call
+    structures = {}
+    with ThreadPoolExecutor(max_workers=min(len(precleaned), 8)) as executor:
+        futures = {
+            executor.submit(
+                analyze_sheet_structure,
+                df,
+                name,
+                workbook_scan.sheets.get(name),
+            ): name
+            for name, df in precleaned.items()
+        }
+        for future in as_completed(futures):
+            name = futures[future]
+            structures[name] = future.result()
+
+    # Extract clean DataFrames using the pre-computed structures
+    frames: dict[str, pd.DataFrame] = {}
+    for sheet_name, df in precleaned.items():
+        cleaned = _extract_table(df, sheet_name, structures[sheet_name])
         if cleaned is not None:
             frames[sheet_name] = cleaned
 
     return frames
 
 
-def _extract_table(df: pd.DataFrame, sheet_name: str) -> pd.DataFrame | None:
+def _extract_table(df: pd.DataFrame, sheet_name: str, structure) -> pd.DataFrame | None:
     """
     Find the best header row and return clean tabular data.
 
-    Uses the LLM to detect sheet structure (header row, data start, rows to skip)
-    with a heuristic fallback. Handles any layout: leading title rows, merged cell
-    group headers, embedded subtotals, trailing metadata, duplicate column names,
-    currency symbols, and percentage strings.
+    Receives a pre-computed SheetStructure from the parallel LLM analysis step.
+    Handles any layout: leading title rows, merged cell group headers, embedded
+    subtotals, trailing metadata, duplicate column names, currency symbols,
+    and percentage strings.
     """
     if df.empty:
         return None
 
-    # Drop fully empty rows and columns first so the LLM sees a clean sample.
-    df = df.dropna(how="all").dropna(axis=1, how="all").reset_index(drop=True)
-
-    if df.empty:
-        return None
-
-    # Ask the LLM to identify the header row, data start row, and any rows
-    # to skip (subtotals, grand totals, metadata rows embedded in the data).
-    structure = analyze_sheet_structure(df, sheet_name)
-
     header_idx = structure.header_row
     raw_cols = [
-        str(df.loc[header_idx, c]).strip() if pd.notna(df.loc[header_idx, c]) else f"col_{i}"
+        str(df.loc[header_idx, c]).strip()
+        if pd.notna(df.loc[header_idx, c]) and str(df.loc[header_idx, c]).strip() != ""
+        else f"col_{i}"
         for i, c in enumerate(df.columns)
     ]
 
@@ -65,6 +99,10 @@ def _extract_table(df: pd.DataFrame, sheet_name: str) -> pd.DataFrame | None:
 
     df.columns = deduped
 
+    # Apply LLM-inferred names for blank header columns (e.g. col_7 → Revenue)
+    if structure.column_renames:
+        df.rename(columns=structure.column_renames, inplace=True)
+
     # Keep only rows from data_start_row onward, excluding skip_rows
     data_rows = df.loc[structure.data_start_row:]
     if structure.skip_rows:
@@ -73,6 +111,11 @@ def _extract_table(df: pd.DataFrame, sheet_name: str) -> pd.DataFrame | None:
             errors="ignore",
         )
     df = data_rows.reset_index(drop=True)
+
+    # Normalize empty strings to NaN so dropna and forward-fill work correctly.
+    # openpyxl returns '' for explicitly-empty cells in merged regions; pandas
+    # does not treat '' as null, which breaks both dropna and sparse-column detection.
+    df = df.replace('', pd.NA)
 
     # Drop rows that are entirely empty
     df = df.dropna(how="all")
@@ -121,7 +164,15 @@ def _extract_table(df: pd.DataFrame, sheet_name: str) -> pd.DataFrame | None:
         if converted.isna().sum() == df[col].isna().sum():
             df[col] = converted
 
-    return df
+    # Drop group-header rows: rows where every numeric column is NaN.
+    # These are merged-cell section labels (e.g. "Sales" spanning a department block)
+    # that carry no data values. Identifier columns are forward-filled so they remain
+    # correct in the rows that do have data.
+    numeric_cols = df.select_dtypes(include="number").columns
+    if len(numeric_cols) > 0:
+        df = df[~df[numeric_cols].isna().all(axis=1)]
+
+    return df.reset_index(drop=True)
 
 
 def _strip_leading_descriptor_rows(df: pd.DataFrame) -> pd.DataFrame:
@@ -182,6 +233,9 @@ def _strip_trailing_metadata(df: pd.DataFrame) -> pd.DataFrame:
         if re.match(r"^(data as of|source:|note:|w\d+\s*=|updated|last|version|\*)", first_val, re.IGNORECASE) \
                 or len(first_val) > 60:
             last_good = i
+        # Numeric-only trailing rows are grand totals (e.g. a single sum cell at the bottom)
+        elif all(isinstance(v, (int, float)) for v in non_null):
+            last_good = i
         else:
             break
 
@@ -241,16 +295,19 @@ def _forward_fill_sparse_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     Only fills columns where:
     - dtype is object (text grouping columns, not numeric data)
-    - At least 30% of values are null (genuinely sparse, not just missing data)
-    - The non-null values repeat in a pattern consistent with group headers
+    - At least 30% of values are blank (null or empty string)
+
+    Treats empty strings as blanks — openpyxl returns '' for explicitly-empty
+    cells in merged regions, which isna() would otherwise miss.
 
     This handles sheets like Revenue (Region: Americas/EMEA/APAC spanning rows)
     and Budgets (Department: SALES/MARKETING/ENGINEERING spanning line items).
     """
     for col in df.select_dtypes(include="object").columns:
-        null_ratio = df[col].isna().sum() / len(df)
+        normalized = df[col].replace('', pd.NA)
+        null_ratio = normalized.isna().sum() / len(df)
         if null_ratio >= 0.3:
-            df[col] = df[col].ffill().infer_objects(copy=False)
+            df[col] = normalized.ffill().infer_objects(copy=False)
     return df
 
 
@@ -292,7 +349,7 @@ def _clean_cell_value(val):
     if re.match(r'^-?[\d,]+(\.\d+)?$', cleaned):
         cleaned = cleaned.replace(',', '')
 
-    return cleaned if cleaned != '' else val
+    return cleaned if cleaned != '' else None
 
 
 def has_formula_cells(path: Path) -> bool:
