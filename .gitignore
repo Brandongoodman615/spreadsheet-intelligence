@@ -30,6 +30,7 @@ test_files/
 .vscode/
 .idea/
 *.swp
+*.code-workspace
 
 # Alembic
 alembic/versions/*.pyc

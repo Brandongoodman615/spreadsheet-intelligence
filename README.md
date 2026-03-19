@@ -12,7 +12,7 @@ Upload an Excel workbook and query it in plain English. Get exact answers backed
 - Node 20+ (use [nvm](https://github.com/nvm-sh/nvm))
 - PostgreSQL 15+
 - pgvector extension (`brew install pgvector` on macOS)
-- An OpenAI API key — estimated cost per workbook upload: ~$0.01–0.03 (structure analysis + relationship detection + embeddings). Query cost: ~$0.01–0.02 per question (gpt-4o). Typical full session under $0.10.
+- An OpenAI API key
 
 ### 1. Clone the repo
 
@@ -82,6 +82,14 @@ npm run dev
 ```
 
 Frontend available at `http://localhost:5173`.
+
+---
+
+## Example
+
+![Query example](docs/image.png)
+
+Two cross-sheet queries against `company_data.xlsx`. The first joins Sales → Employees to return revenue by rep name. The second joins Sales → Products to break down revenue by category. Both show the plain-English explanation, source attribution badges, and a toggle to view the generated SQL.
 
 ---
 
