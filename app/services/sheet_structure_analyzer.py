@@ -50,7 +50,12 @@ def analyze_sheet_structure(
     an invalid response — so upload never breaks due to this step.
     """
     sample_size = min(35, len(df))
-    rows_text = _format_sample(df.iloc[:sample_size])
+    sample = df.iloc[:sample_size]
+
+    # Pre-detect which columns have blank/NA values in the first non-empty candidate
+    # rows so we can explicitly annotate them in the prompt.  We don't know
+    # header_row yet, so we pass None here and annotate after the first call.
+    rows_text = _format_sample(sample)
     scan_block = _format_scan_metadata(sheet_scan)
     prompt = (
         _prompt_template
@@ -71,6 +76,37 @@ def analyze_sheet_structure(
         data = json.loads(raw)
         structure = SheetStructure(**data)
         _validate_structure(structure, len(df))
+
+        # Check whether any blank header positions were missed.  If the LLM
+        # identified the header row but left column_renames empty (or incomplete)
+        # for columns that are actually blank in that row, retry once with an
+        # explicit annotation listing the missed positions.
+        missed = _find_blank_header_cols(df, structure.header_row, structure.column_renames)
+        if missed:
+            logger.info(
+                "Sheet '%s': retrying rename for blank cols %s",
+                sheet_name, missed,
+            )
+            rows_text2 = _format_sample(sample, blank_col_indices=missed)
+            prompt2 = (
+                _prompt_template
+                .replace("{scan_metadata}", scan_block)
+                .replace("{sheet_name}", sheet_name)
+                .replace("{rows}", rows_text2)
+            )
+            resp2 = _client.chat.completions.create(
+                model=settings.structure_model,
+                max_tokens=256,
+                temperature=0,
+                response_format={"type": "json_object"},
+                messages=[{"role": "user", "content": prompt2}],
+            )
+            raw2 = resp2.choices[0].message.content.strip()
+            data2 = json.loads(raw2)
+            structure2 = SheetStructure(**data2)
+            _validate_structure(structure2, len(df))
+            structure = structure2
+
         logger.info(
             "Sheet '%s' structure: header=%d, data_start=%d, skip=%s, renames=%s — %s",
             sheet_name, structure.header_row, structure.data_start_row,
@@ -84,6 +120,24 @@ def analyze_sheet_structure(
             sheet_name, exc,
         )
         return _heuristic_structure(df)
+
+
+def _find_blank_header_cols(df: pd.DataFrame, header_row: int, existing_renames: dict) -> list[int]:
+    """
+    Return col indices that are blank in header_row and not already in existing_renames.
+
+    A position is considered blank if its value is NA, empty string, or whitespace-only.
+    These are the positions the LLM missed and need a retry annotation.
+    """
+    if header_row >= len(df):
+        return []
+    row = df.iloc[header_row]
+    missing = []
+    for i, val in enumerate(row):
+        is_blank = pd.isna(val) or str(val).strip() == ""
+        if is_blank and f"col_{i}" not in existing_renames:
+            missing.append(i)
+    return missing
 
 
 def _validate_structure(structure: SheetStructure, row_count: int) -> None:
@@ -150,12 +204,15 @@ def _format_scan_metadata(sheet_scan: SheetScan | None) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _format_sample(df: pd.DataFrame) -> str:
+def _format_sample(df: pd.DataFrame, blank_col_indices: list[int] | None = None) -> str:
     """
     Format raw DataFrame rows as numbered text for the LLM prompt.
     Empty cells are shown as <empty> so the LLM can see the sparsity pattern.
     A column-index header line is prepended so the LLM can map blank header
     positions to the correct col_N placeholder name.
+
+    If blank_col_indices is provided, an explicit annotation line is appended
+    after the data listing the col_N positions that must be renamed.
     """
     col_header = "Cols: " + " | ".join(f"col_{i}" for i in range(len(df.columns)))
     lines = [col_header]
@@ -165,4 +222,7 @@ def _format_sample(df: pd.DataFrame) -> str:
             for v in df.loc[idx]
         ]
         lines.append(f"Row {idx}: {' | '.join(vals)}")
+    if blank_col_indices:
+        names = ", ".join(f"col_{i}" for i in blank_col_indices)
+        lines.append(f"\n⚠ Blank header positions that MUST be renamed: {names}")
     return "\n".join(lines)
